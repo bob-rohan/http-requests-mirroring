@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"hash/crc64"
 	"io"
-	"io/ioutil"
 	"log"
 	math_rand "math/rand"
 	"net"
@@ -66,27 +65,73 @@ func (h *httpStreamFactory) New(net, transport gopacket.Flow) tcpassembly.Stream
 
 func (h *httpStream) run() {
 	buf := bufio.NewReader(&h.r)
+	rawRequest := make([]byte, 0)
+
+	// loop all requests in stream
 	for {
-		req, err := http.ReadRequest(buf)
-		if err == io.EOF {
-			// We must read until we see an EOF... very important!
-			return
-		} else if err != nil {
-			log.Println("Error reading stream", h.net, h.transport, ":", err)
-		} else {
-			reqSourceIP := h.net.Src().String()
-			reqDestionationPort := h.transport.Dst().String()
-			body, bErr := ioutil.ReadAll(req.Body)
-			if bErr != nil {
-				return
-			}
-			req.Body.Close()
-			go forwardRequest(req, reqSourceIP, reqDestionationPort, body)
+		// Rightsize the chunk
+		_, peekErr := buf.Peek(4096) // read without moving cursor to define buffered len
+		if peekErr != nil && peekErr != io.EOF {
+			log.Println("Error reading stream", h.net, h.transport, ":", peekErr)
+			break
 		}
+		buffered := buf.Buffered()
+		chunk := make([]byte, buffered)
+
+		// Read the chunk
+		_, readErr := io.ReadFull(buf, chunk)
+		if readErr != nil && readErr != io.EOF {
+			log.Println("Error reading stream", h.net, h.transport, ":", readErr)
+			break
+		}
+
+		// split it up
+		requestChunk := bytes.Split(chunk, []byte("POST "))
+
+		// TODO unit test algorithm
+		// GET=do nothing
+		// POST=add "POST" only
+		// POST,POST=process request 1, add "POST" but don't process request 2
+		// POST,POST,POST-partial=process request 1, process request 2, add POST but don't process request 2
+		for i := 0; i < len(requestChunk)-1; i++ {
+			if string(requestChunk[i]) == "" {
+				rawRequest = append(rawRequest, []byte("POST ")...)
+				continue
+			}
+			rawRequest = append(rawRequest, requestChunk[i]...)
+			processRequest(h, rawRequest)
+			rawRequest = []byte("POST ")
+		}
+
+		rawRequest = append(rawRequest, requestChunk[len(requestChunk)-1]...)
+
+		if peekErr == io.EOF || readErr == io.EOF {
+			break
+		}
+	}
+
+	processRequest(h, rawRequest)
+}
+
+func processRequest(h *httpStream, rawRequest []byte) {
+
+	buf := bufio.NewReader(bytes.NewReader(rawRequest))
+	req, readErr := http.ReadRequest(buf)
+
+	if readErr != nil && readErr != io.EOF {
+		log.Println("Error reading stream", h.net, h.transport, ":", readErr)
+		return
+	}
+
+	if req.Method == "POST" {
+		reqSourceIP := h.net.Src().String()
+		reqDestionationPort := h.transport.Dst().String()
+
+		go forwardRequest(req, reqSourceIP, reqDestionationPort, req.Body)
 	}
 }
 
-func forwardRequest(req *http.Request, reqSourceIP string, reqDestionationPort string, body []byte) {
+func forwardRequest(req *http.Request, reqSourceIP string, reqDestionationPort string, body io.Reader) {
 
 	// if percentage flag is not 100, then a percentage of requests is skipped
 	if *fwdPerc != 100 {
@@ -128,10 +173,13 @@ func forwardRequest(req *http.Request, reqSourceIP string, reqDestionationPort s
 	url := fmt.Sprintf("%s%s", string(*fwdDestination), req.RequestURI)
 
 	// create a new HTTP request
-	forwardReq, err := http.NewRequest(req.Method, url, bytes.NewReader(body))
+	forwardReq, err := http.NewRequest(req.Method, url, body)
 	if err != nil {
 		return
 	}
+
+	// Set Method
+	forwardReq.Method = req.Method
 
 	// add headers to the new HTTP request
 	for header, values := range req.Header {
@@ -163,7 +211,7 @@ func forwardRequest(req *http.Request, reqSourceIP string, reqDestionationPort s
 	httpClient := &http.Client{}
 	resp, rErr := httpClient.Do(forwardReq)
 	if rErr != nil {
-		// log.Println("Forward request error", ":", err)
+		log.Println("Forward request error", ":", rErr)
 		return
 	}
 
