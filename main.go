@@ -39,6 +39,7 @@ var fwdBy = flag.String("percentage-by", "", "Can be empty. Otherwise, valid val
 var fwdHeader = flag.String("percentage-by-header", "", "If percentage-by is header, then specify the header here.")
 var reqPort = flag.Int("filter-request-port", 80, "Must be between 0 and 65535.")
 var keepHostHeader = flag.Bool("keep-host-header", false, "Keep Host header from original request.")
+var maxTransmissionUnit = flag.Int("max-transmission-unit", 8951, "Packets longer than MTU will be trimmed.")
 
 // Build a simple HTTP request parser using tcpassembly.StreamFactory and tcpassembly.Stream interfaces
 
@@ -257,7 +258,7 @@ func main() {
 
 	// Set up pcap packet capture
 	log.Printf("Starting capture on interface vxlan0")
-	handle, err = pcap.OpenLive("vxlan0", 8951, true, pcap.BlockForever)
+	handle, err = pcap.OpenLive("vxlan0", int32(*maxTransmissionUnit), true, pcap.BlockForever)
 	if err != nil {
 		log.Fatal(err)
 	}
